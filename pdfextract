@@ -1,0 +1,203 @@
+#!/bin/bash
+
+### BEGIN SETTINGS
+declare -r VERSION="1.0"
+declare -r DIR="/tmp/$$"
+### END SETTINGS
+
+################################################################################
+# Functions
+################################################################################
+
+function usage() {
+    echo -e "Usage: $0 [-h|--help] [-v|--version]"
+    echo -e "Usage: $0 -k|--keep <number,...> <filename> [out-filename]"
+    echo -e "Usage: $0 -r|--remove <number,...> <filename> [out-filename]"
+    echo
+    echo -e "\t-h,--help            Display this help and exit."
+    echo -e "\t-v,--version         Display the current version and exit"
+    echo
+    echo -e "\t-k,--keep <number>   Keep only pages precised by number (comma separated list)."
+    echo -e "\t-r,--remove <number> Remove only pages precised by number (comma separated list)."
+    echo
+    echo -e "\tfilename             Input pdf filename."
+    echo -e "\tout-filename         Output pdf filename. Use <filename> if not provided."
+    echo
+    echo "Page start with number 1 NOT 0."
+    echo "!!! You cannot keep and remove pages at the same time."
+    echo
+    echo -e "Example:"
+    echo -e "\t$0 -k 1,4,6 file.pdf    - Keep pages 1, 4 and 6"
+    echo -e "\t$0 -k 1-5 file.pdf      - Keep pages 1, 2, 3, 4 and 5"
+    echo -e "\t$0 -k 1-4,6 file.pdf    - Keep pages 1, 2, 3, 4 and 6"
+    echo -e "\t$0 -k 1-4 -k 6 file.pdf - Keep pages 1, 2, 3, 4 and 6"
+    echo
+    echo -e "\t$0 -r 6 file.pdf        - Remove page 6"
+    echo -e "\t$0 -r 6 -r 1-4 file.pdf - Remove pages 1, 2, 3, 4 and 6"
+    echo -e "\t$0 -r last file.pdf     - Remove last page only"
+
+    exit 1
+}
+
+function print_version() {
+    echo "$0 version $VERSION"
+    exit 1
+}
+
+function print_error() {
+    (>&2 echo "$@")
+}
+
+function parse_number_into_array() {
+    local raw_number="$(sed "s/last/$page_count/g" <<< "$1")"
+    local comma_separated_numbers=($(tr ',' '\n' <<< "$raw_number"))
+    numbers=()
+
+    for num in "${comma_separated_numbers[@]}"
+    do
+        if [[ "$num" =~ ^[[:digit:]]+$ ]]; then
+            [ $num -le $page_count ] && numbers+=($num)
+        elif [[ "$num" =~ ^([[:digit:]]*)-([[:digit:]]*)$ ]]; then
+            local min=${BASH_REMATCH[1]}
+            local max=${BASH_REMATCH[2]}
+            [ -z "$min" ] && min=1
+            [ -z "$max" ] && max=$page_count
+            [ $max -gt $page_count ] && max=$page_count
+            [ $min -gt $max ] && print_error "The miminum page number must be lower than the maximum page number ($num)" && exit 1
+
+            for i in "$(seq $min $max)"; do numbers+=($i); done
+        else
+            print_error "Invalid input ($num)"
+            usage
+        fi
+    done
+}
+
+function array_to_filenames() {
+    local array=("$@")
+
+    filenames=()
+    for value in "${array[@]}"
+    do
+        filenames+=("${DIR}/${value}.pdf")
+    done
+}
+
+function array_to_string() {
+    local array=("$@")
+
+    result=""
+    for value in "${array[@]}"
+    do
+        result+=" $value"
+    done
+}
+
+function numbers_to_args() {
+    array_to_filenames "$@"
+    array_to_string "${filenames[@]}"
+    unset ilenames
+}
+
+function is_in_numbers_array() {
+    local value="$1"
+
+    for number in "${numbers[@]}"
+    do
+        [ $value -eq $number ] && return 0
+        [ $value -lt $number ] && return 1
+    done
+
+    return 1
+}
+
+################################################################################
+# Variables
+################################################################################
+
+################################################################################
+# Code
+################################################################################
+
+while [ $# -ge 1 ]
+do
+    case $1 in
+        -h|--help)
+            usage ;;
+        -v|--version)
+            print_version ;;
+        -k|--keep)
+            [ ! -z "$unformated_keep_number" ] && unformated_keep_number+=","
+            unformated_keep_number+="$2"
+            shift ;;
+        -r|--remove)
+            [ ! -z "$unformated_remove_number" ] && unformated_remove_number+=","
+            unformated_remove_number+="$2"
+            shift ;;
+        -*)
+            print_error "Unknown option '$1'"
+            exit 1 ;;
+        *)
+            if [ -z "$in_filename" ]; then
+                in_filename="$1"
+            else
+                out_filename="$1"
+            fi ;;
+    esac
+
+    shift
+done
+
+[ -z "$in_filename" ] && usage
+[ -z "$out_filename" ] && out_filename="$in_filename"
+[ -z "$unformated_keep_number" ] && [ -z "$unformated_remove_number" ] && usage
+[ ! -z "$unformated_keep_number" ] && [ ! -z "$unformated_remove_number" ] && usage
+
+fileinfo="$(pdfinfo "$in_filename")"
+[ -z "$fileinfo" ] && exit 1
+page_count=$(echo "$fileinfo" | grep "Pages" | sed 's/Pages:\s*\(\d*\)/\1/g')
+[ $page_count -eq 0 ] && exit 0 # Nothing to do
+
+min_page_number=1
+max_page_number=$page_count
+
+if [ ! -z "$unformated_remove_number" ]; then
+    parse_number_into_array "$unformated_remove_number"
+    IFS=$'\n' numbers=($(sort -n <<< "${numbers[*]}"))
+    unset IFS
+
+    final_numbers=()
+    for i in $(seq 1 $page_count)
+    do
+        if ! is_in_numbers_array $i; then
+            final_numbers+=($i)
+        fi
+    done
+    unset numbers
+fi
+
+if [ ! -z "$unformated_keep_number" ]; then
+    parse_number_into_array "$unformated_keep_number"
+    final_numbers=("${numbers[@]}")
+    unset numbers
+fi
+
+min_page_number=${final_numbers[0]}
+max_page_number=${final_numbers[0]}
+for number in "${final_numbers[@]}"
+do
+    if [ $number -lt $min_page_number ]; then
+        min_page_number=$number
+    elif [ $number -gt $max_page_number ]; then
+        max_page_number=$number
+    fi
+done
+
+[ ${#final_numbers[@]} -eq 0 ] && (rm -f "$out_filename"; exit $?)
+
+numbers_to_args "${final_numbers[@]}"
+mkdir -p $DIR || exit 1
+trap "rm -rf $DIR" EXIT
+
+pdfseparate -f $min_page_number -l $max_page_number "$in_filename" "$DIR/%d.pdf" || exit 1
+pdfunite $result "$out_filename" || exit 1
